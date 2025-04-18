@@ -1,18 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Navigate } from 'react-router-dom';
-import { Clock, DollarSign, User, AlertCircle, XCircle, Trophy } from 'lucide-react';
+import { Clock, DollarSign, User, AlertCircle, XCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import type { Listing, Bid } from '../types/database';
 
 interface BidWithBidder extends Bid {
   bidder_username?: string;
-}
-
-interface WinnerProfile {
-  username: string;
-  first_name: string | null;
-  last_name: string | null;
 }
 
 export function ListingDetail() {
@@ -24,38 +18,99 @@ export function ListingDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [winner, setWinner] = useState<WinnerProfile | null>(null);
+  const [timeLeft, setTimeLeft] = useState<string>('');
 
   useEffect(() => {
     if (!id) return;
     fetchListingDetails();
+
+    // Set up real-time subscription
+    const subscription = supabase
+      .channel('listing_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'listings',
+          filter: `id=eq.${id}`
+        },
+        (payload) => {
+          if (payload.new) {
+            setListing(current => ({
+              ...current,
+              ...payload.new
+            } as Listing));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, [id]);
+
+  useEffect(() => {
+    if (!listing) return;
+
+    const endDate = new Date(listing.created_at);
+    endDate.setDate(endDate.getDate() + 7);
+
+    const updateTimeLeft = () => {
+      const now = new Date();
+      const timeDiff = endDate.getTime() - now.getTime();
+
+      if (timeDiff <= 0) {
+        setTimeLeft('Auction ended');
+        if (listing.status === 'active') {
+          handleAuctionExpiration();
+        }
+        return;
+      }
+
+      const days = Math.floor(timeDiff / (1000 * 60 * 60 * 24));
+      const hours = Math.floor((timeDiff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+      const minutes = Math.floor((timeDiff % (1000 * 60 * 60)) / (1000 * 60));
+
+      setTimeLeft(`${days}d ${hours}h ${minutes}m`);
+    };
+
+    updateTimeLeft();
+    const interval = setInterval(updateTimeLeft, 60000); // Update every minute
+
+    return () => clearInterval(interval);
+  }, [listing]);
+
+  const handleAuctionExpiration = async () => {
+    if (!id) return;
+
+    try {
+      const { error: endError } = await supabase
+        .rpc('end_auction', { listing_id: id });
+
+      if (endError) throw endError;
+    } catch (err) {
+      console.error('Error ending expired auction:', err);
+    }
+  };
 
   const fetchListingDetails = async () => {
     try {
       setLoading(true);
       
-      // Fetch listing details with winner information
+      // Fetch listing details
       const { data: listingData, error: listingError } = await supabase
         .from('listings')
         .select(`
           *,
-          profiles!listings_seller_id_fkey(username),
-          winner:profiles!listings_winner_id_fkey(
-            username,
-            first_name,
-            last_name
-          )
+          profiles!listings_seller_id_fkey(username)
         `)
         .eq('id', id)
         .single();
       
       if (listingError) throw listingError;
       setListing(listingData);
-      
-      if (listingData.winner) {
-        setWinner(listingData.winner);
-      }
       
       // Fetch bids with usernames
       const { data: bidsData, error: bidsError } = await supabase
@@ -92,43 +147,14 @@ export function ListingDetail() {
       setError(null);
       setSuccess(null);
 
-      // Get the highest bid
-      const highestBid = bids[0]; // Bids are already ordered by amount desc
+      const { error: endError } = await supabase
+        .rpc('end_auction', { listing_id: id });
 
-      // Update the listing status and winner
-      const { error: updateError } = await supabase
-        .from('listings')
-        .update({
-          status: 'ended',
-          winner_id: highestBid?.bidder_id || null,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', id);
+      if (endError) throw endError;
 
-      if (updateError) throw updateError;
-
-      // Fetch updated listing details to get winner information
-      const { data: updatedListing, error: fetchError } = await supabase
-        .from('listings')
-        .select(`
-          *,
-          profiles!listings_seller_id_fkey(username),
-          winner:profiles!listings_winner_id_fkey(
-            username,
-            first_name,
-            last_name
-          )
-        `)
-        .eq('id', id)
-        .single();
-
-      if (fetchError) throw fetchError;
-
-      // Update local state
-      setListing(updatedListing);
-      setWinner(updatedListing.winner);
-      setSuccess('Auction ended successfully' + (highestBid ? ` - Winner: ${highestBid.bidder_username}` : ' - No bids were placed'));
+      setSuccess('Auction ended successfully');
       setShowConfirmEnd(false);
+      await fetchListingDetails(); // Refresh the listing details
     } catch (err) {
       console.error('Error ending auction:', err);
       setError('Failed to end auction. Please try again.');
@@ -148,11 +174,6 @@ export function ListingDetail() {
   if (!listing) {
     return <Navigate to="/your-listings" replace />;
   }
-
-  // Calculate time left
-  const endDate = new Date(listing.created_at);
-  endDate.setDate(endDate.getDate() + 7); // 7-day auctions
-  const timeLeft = Math.max(0, Math.ceil((endDate.getTime() - Date.now()) / (1000 * 60 * 60)));
 
   return (
     <div className="min-h-screen bg-gray-100 py-12">
@@ -226,36 +247,12 @@ export function ListingDetail() {
                     {listing.status === 'active' && (
                       <span className="ml-2">
                         <Clock className="h-5 w-5 inline mr-1" />
-                        {timeLeft}h left
+                        {timeLeft}
                       </span>
                     )}
                   </div>
                 </div>
               </div>
-
-              {listing?.status === 'ended' && (
-                <div className="mt-4 p-4 bg-green-50 rounded-lg border border-green-200">
-                  <div className="flex items-center">
-                    <Trophy className="h-5 w-5 text-green-600 mr-2" />
-                    <span className="font-medium text-green-800">
-                      {winner ? (
-                        <>
-                          Auction Winner: {winner.first_name && winner.last_name 
-                            ? `${winner.first_name} ${winner.last_name}`
-                            : winner.username}
-                        </>
-                      ) : (
-                        'No winner (no bids placed)'
-                      )}
-                    </span>
-                  </div>
-                  {winner && listing.current_bid && (
-                    <p className="mt-2 text-sm text-green-600">
-                      Winning Bid: ${listing.current_bid}
-                    </p>
-                  )}
-                </div>
-              )}
               
               <div className="mt-6">
                 <h2 className="text-lg font-semibold text-gray-900 mb-2">Description</h2>
