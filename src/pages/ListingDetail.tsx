@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Navigate } from 'react-router-dom';
-import { Clock, DollarSign, User, AlertCircle, XCircle } from 'lucide-react';
+import { Clock, DollarSign, User, AlertCircle, XCircle, Trophy } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import type { Listing, Bid } from '../types/database';
@@ -9,11 +9,15 @@ interface BidWithBidder extends Bid {
   bidder_username?: string;
 }
 
+interface ExtendedListing extends Listing {
+  winner_username?: string;
+}
+
 export function ListingDetail() {
   const { id } = useParams();
   const { currentUser } = useAuth();
   const [showConfirmEnd, setShowConfirmEnd] = useState(false);
-  const [listing, setListing] = useState<Listing | null>(null);
+  const [listing, setListing] = useState<ExtendedListing | null>(null);
   const [bids, setBids] = useState<BidWithBidder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +44,7 @@ export function ListingDetail() {
             setListing(current => ({
               ...current,
               ...payload.new
-            } as Listing));
+            } as ExtendedListing));
           }
         }
       )
@@ -99,18 +103,26 @@ export function ListingDetail() {
     try {
       setLoading(true);
       
-      // Fetch listing details
+      // Fetch listing details with winner information
       const { data: listingData, error: listingError } = await supabase
         .from('listings')
         .select(`
           *,
-          profiles!listings_seller_id_fkey(username)
+          profiles!listings_seller_id_fkey(username),
+          winner:profiles!listings_winner_id_fkey(username)
         `)
         .eq('id', id)
         .single();
       
       if (listingError) throw listingError;
-      setListing(listingData);
+
+      // Add winner username to listing data
+      const extendedListing: ExtendedListing = {
+        ...listingData,
+        winner_username: listingData.winner?.username
+      };
+      
+      setListing(extendedListing);
       
       // Fetch bids with usernames
       const { data: bidsData, error: bidsError } = await supabase
@@ -244,10 +256,15 @@ export function ListingDetail() {
                     }`}>
                       {listing.status.charAt(0).toUpperCase() + listing.status.slice(1)}
                     </span>
-                    {listing.status === 'active' && (
+                    {listing.status === 'active' ? (
                       <span className="ml-2">
                         <Clock className="h-5 w-5 inline mr-1" />
                         {timeLeft}
+                      </span>
+                    ) : listing.winner_username && (
+                      <span className="ml-2 flex items-center text-green-600">
+                        <Trophy className="h-5 w-5 mr-1" />
+                        Won by {listing.winner_username}
                       </span>
                     )}
                   </div>
